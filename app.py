@@ -31,7 +31,6 @@ EQUIPMENT = [
     "바벨",
     "밴드",
     "링/낮은바",
-    "바닥만 가능",
 ]
 
 @dataclass
@@ -52,6 +51,9 @@ def init_state():
     st.session_state.setdefault("player", {"session_idx": 0, "ex_idx": 0, "set_idx": 1, "phase": "idle", "phase_end": None, "phase_total": None})
     st.session_state.setdefault("stretch_done", False)
 
+    st.session_state.setdefault("equip_selected", {e: (e in st.session_state["profile"]["equipment"]) for e in EQUIPMENT})
+    st.session_state.setdefault("skill_selected", {s: (s in st.session_state["profile"]["skills"]) for s in SKILLS})
+
 def go_step(n: int):
     st.session_state.step = n
 
@@ -68,6 +70,7 @@ def generate_plan(profile: Dict, settings: Dict) -> List[List[Exercise]]:
     eq = set(profile.get("equipment", []))
     skills = profile.get("skills", [])
     freq = int(profile.get("freq", 3))
+
     can_dips = "딥스 가능(평행봉/의자 포함)" in eq
     can_wall = "벽 사용 가능" in eq
     can_pull = "풀업바" in eq
@@ -208,6 +211,41 @@ def autorefresh(interval_ms: int = 250):
     else:
         st.button("새로고침", key="manual_refresh")
 
+def tiles_css():
+    st.markdown("""
+<style>
+/* 타일 버튼(둥근 정사각형 느낌) */
+div[data-testid="stButton"] > button {
+    border-radius: 16px !important;
+    padding: 12px 10px !important;
+    min-height: 74px !important;   /* iPad에서 타일 느낌 */
+    font-weight: 800 !important;
+    white-space: normal !important;
+    line-height: 1.15 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+def tile_grid(options: List[str], selected_map: Dict[str, bool], key_prefix: str):
+    tiles_css()
+    rows = [options[:4], options[4:]]  # 4 + 3 = 7칸
+    for r, opts in enumerate(rows):
+        cols = st.columns(len(opts))
+        for c, label_raw in enumerate(opts):
+            is_on = bool(selected_map.get(label_raw, False))
+            label = f"✓ {label_raw}" if is_on else label_raw
+            btn_type = "primary" if is_on else "secondary"
+            if cols[c].button(label, key=f"{key_prefix}_{r}_{c}", type=btn_type, use_container_width=True):
+                selected_map[label_raw] = not is_on
+
+def equip_tiles():
+    tile_grid(EQUIPMENT, st.session_state.equip_selected, "equip_btn")
+    st.session_state.profile["equipment"] = [e for e in EQUIPMENT if st.session_state.equip_selected.get(e, False)]
+
+def skill_tiles():
+    tile_grid(SKILLS, st.session_state.skill_selected, "skill_btn")
+    st.session_state.profile["skills"] = [s for s in SKILLS if st.session_state.skill_selected.get(s, False)]
+
 def page_stretch():
     st.title("운동 전 스트레칭")
     st.markdown("""
@@ -255,7 +293,6 @@ def page_player():
         return
 
     p = st.session_state.player
-    settings = st.session_state.settings
     day = plan[p["session_idx"]]
     ex = day[p["ex_idx"]]
 
@@ -282,11 +319,11 @@ def page_player():
                 p["phase_end"] = time.time() + int(ex.rest_seconds)
                 st.experimental_rerun()
         else:
-            st.write(f"오늘 목표: {ex.sets}세트 (시간은 타이머에서만 표시)")
+            st.write("오늘 목표: 세트 진행 (시간은 타이머에서만 표시)")
             if st.button("홀드 시작", type="primary", use_container_width=True):
                 p["phase"] = "prep"
-                p["phase_total"] = int(settings["prep_seconds_hold"])
-                p["phase_end"] = time.time() + int(settings["prep_seconds_hold"])
+                p["phase_total"] = int(st.session_state.settings["prep_seconds_hold"])
+                p["phase_end"] = time.time() + int(st.session_state.settings["prep_seconds_hold"])
                 st.experimental_rerun()
 
     else:
@@ -359,39 +396,39 @@ def page_player():
 
 def page_onboarding():
     st.title("칼리스데닉스 루틴 앱(프로토타입)")
-    st.caption("루틴 목록에는 시간을 쓰지 않고, 타이머 화면에서만 시간을 표시합니다.")
+    st.caption("장비/동작은 7개 타일로 선택합니다. 시간은 타이머 화면에서만 표시합니다.")
 
     step = st.session_state.step
-    profile = st.session_state.profile
 
     if step == 1:
         st.subheader("1) 장비 선택")
-        profile["equipment"] = st.multiselect("장비를 선택하세요.", EQUIPMENT, default=profile["equipment"])
-        if st.button("다음", type="primary"):
+        equip_tiles()
+        if st.button("다음", type="primary", use_container_width=True):
             go_step(2)
 
     elif step == 2:
-        st.subheader("2) 목표 스킬 선택")
-        profile["skills"] = st.multiselect("운동을 선택하세요.", SKILLS, default=profile["skills"])
+        st.subheader("2) 원하는 동작 선택")
+        skill_tiles()
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("이전"):
+            if st.button("이전", use_container_width=True):
                 go_step(1)
         with c2:
-            if st.button("다음", type="primary"):
+            if st.button("다음", type="primary", use_container_width=True):
                 go_step(3)
 
     elif step == 3:
         st.subheader("3) 주당 운동 횟수 / 1회 시간")
-        profile["freq"] = st.slider("주당 운동 횟수", 2, 6, int(profile["freq"]))
-        profile["session_minutes"] = st.slider("1회 운동 가능 시간(분)", 30, 120, int(profile["session_minutes"]), step=5)
+        prof = st.session_state.profile
+        prof["freq"] = st.slider("주당 운동 횟수", 2, 6, int(prof["freq"]))
+        prof["session_minutes"] = st.slider("1회 운동 가능 시간(분)", 30, 120, int(prof["session_minutes"]), step=5)
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("이전"):
+            if st.button("이전", use_container_width=True):
                 go_step(2)
         with c2:
-            if st.button("루틴 생성", type="primary"):
-                st.session_state.plan = generate_plan(profile, st.session_state.settings)
+            if st.button("루틴 생성", type="primary", use_container_width=True):
+                st.session_state.plan = generate_plan(st.session_state.profile, st.session_state.settings)
                 st.session_state.player = {"session_idx": 0, "ex_idx": 0, "set_idx": 1, "phase": "idle", "phase_end": None, "phase_total": None}
                 st.session_state.stretch_done = False
                 go_step(4)
@@ -405,13 +442,13 @@ def page_onboarding():
                     st.write("• " + format_line(ex))
         c1, c2, c3 = st.columns(3)
         with c1:
-            if st.button("설정"):
+            if st.button("설정", use_container_width=True):
                 go_step(99)
         with c2:
-            if st.button("처음으로"):
+            if st.button("처음으로", use_container_width=True):
                 go_step(1)
         with c3:
-            if st.button("운동 시작", type="primary"):
+            if st.button("운동 시작", type="primary", use_container_width=True):
                 go_step(5)
 
     elif step == 5:
