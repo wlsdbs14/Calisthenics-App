@@ -219,6 +219,18 @@ def autorefresh(interval_ms: int = 250):
     else:
         st.button("새로고침", key="manual_refresh")
 
+def safe_rerun():
+    """Streamlit 버전 차이 대응: 가능하면 st.rerun(), 아니면 experimental_rerun()"""
+    try:
+        st.rerun()
+    except Exception:
+        try:
+            st.experimental_rerun()
+        except Exception:
+            # 최후 수단: 그냥 종료(사용자 액션/오토리프레시로 갱신)
+            return
+
+
 # -----------------------------
 # 체크박스 타일 UI (안정성 최우선)
 # -----------------------------
@@ -625,7 +637,7 @@ def page_settings():
     with c3:
         if st.button("초기화"):
             st.session_state.settings = DEFAULTS.copy()
-            st.stop()
+            return
 
 def page_player():
     plan = st.session_state.plan
@@ -670,13 +682,13 @@ def page_player():
                 p["phase"] = "rest"
                 p["phase_total"] = int(ex.rest_seconds)
                 p["phase_end"] = time.time() + int(ex.rest_seconds)
-                st.stop()
+                safe_rerun()
         else:
             if st.button("홀드 시작", type="primary", use_container_width=True):
                 p["phase"] = "prep"
                 p["phase_total"] = int(st.session_state.settings["prep_seconds_hold"])
                 p["phase_end"] = time.time() + int(st.session_state.settings["prep_seconds_hold"])
-                st.stop()
+                safe_rerun()
 
     else:
         autorefresh(250)
@@ -691,7 +703,7 @@ def page_player():
                 p["phase"] = "work"
                 p["phase_total"] = int(ex.work_seconds)
                 p["phase_end"] = time.time() + int(ex.work_seconds)
-                st.stop()
+                safe_rerun()
 
         elif p["phase"] == "work":
             st.markdown("### 홀드")
@@ -701,7 +713,7 @@ def page_player():
                 p["phase"] = "rest"
                 p["phase_total"] = int(ex.rest_seconds)
                 p["phase_end"] = time.time() + int(ex.rest_seconds)
-                st.stop()
+                safe_rerun()
 
         elif p["phase"] == "rest":
             st.markdown("### 휴식")
@@ -711,7 +723,8 @@ def page_player():
             # 휴식 건너뛰기(즉시 다음 단계로)
             if st.button("휴식 건너뛰기", use_container_width=True):
                 p["phase_end"] = time.time()
-                st.stop()
+                left = 0
+
 
             if left == 0:
                 last_set = (p["set_idx"] >= ex.sets)
@@ -723,7 +736,7 @@ def page_player():
                         if st.button("다음 세트", type="primary", use_container_width=True):
                             p["set_idx"] += 1
                             p["phase"] = "idle"
-                            st.stop()
+                            safe_rerun()
                     else:
                         st.button("다음 세트", disabled=True, use_container_width=True)
 
@@ -734,7 +747,7 @@ def page_player():
                                 p["ex_idx"] += 1
                                 p["set_idx"] = 1
                                 p["phase"] = "idle"
-                                st.stop()
+                                safe_rerun()
                             else:
                                 st.success("회차 완료")
                                 st.session_state.stretch_done = False
@@ -743,14 +756,14 @@ def page_player():
                                     p["ex_idx"] = 0
                                     p["set_idx"] = 1
                                     p["phase"] = "idle"
-                                    st.stop()
+                                    return
                     else:
                         if st.button("운동 건너뛰기", use_container_width=True):
                             if p["ex_idx"] + 1 < len(day):
                                 p["ex_idx"] += 1
                                 p["set_idx"] = 1
                                 p["phase"] = "idle"
-                                st.stop()
+                                return
 
 def page_test():
     st.title("능력 측정 / 4주 테스트")
@@ -777,7 +790,7 @@ def page_test():
                 ht["phase"] = "prep"
                 ht["prep_end"] = time.time() + int(settings["prep_seconds_hold"])
                 ht["elapsed"] = 0.0
-                st.stop()
+                return
         else:
             autorefresh(250)
             if ht["phase"] == "prep":
@@ -786,7 +799,7 @@ def page_test():
                 if left == 0:
                     ht["phase"] = "run"
                     ht["start"] = time.time()
-                    st.stop()
+                    safe_rerun()
             elif ht["phase"] == "run":
                 ht["elapsed"] = time.time() - float(ht["start"])
                 st.metric("경과", mmss(int(ht["elapsed"])))
