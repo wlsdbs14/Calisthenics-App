@@ -761,7 +761,9 @@ def page_skills():
     st.title(APP_TITLE)
     st.header("2) 원하는 동작 선택")
 
-    st.session_state.skills = tile_skill_select(st.session_state.equip, st.session_state.skills)
+    # tile_skill_select 시그니처: (skills, selected, equip_selected)
+    # 첫 인자에 장비(equip)가 들어가면 TypeError가 나므로 SKILLS 목록을 전달해야 함
+    st.session_state.skills = tile_skill_select(SKILLS, st.session_state.skills, st.session_state.equip)
 
     st.markdown("---")
     col1, col2 = st.columns([1, 1])
