@@ -708,6 +708,11 @@ def page_player():
             st.metric("남은 시간", mmss(left))
             st.progress(0 if total == 0 else (total-left)/total)
 
+            # 휴식 건너뛰기(즉시 다음 단계로)
+            if st.button("휴식 건너뛰기", use_container_width=True):
+                p["phase_end"] = time.time()
+                st.experimental_rerun()
+
             if left == 0:
                 last_set = (p["set_idx"] >= ex.sets)
                 st.success("휴식 종료")
