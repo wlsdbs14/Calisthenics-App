@@ -624,7 +624,7 @@ def page_skills():
     st.title(APP_TITLE)
     st.header("2) 원하는 동작 선택")
 
-    st.session_state.skills = tile_skill_select(st.session_state.equip, st.session_state.skills)
+    st.session_state.skills = tile_skill_select(SKILLS, st.session_state.skills, st.session_state.equip)
 
     st.markdown("---")
     col1, col2 = st.columns([1, 1])
