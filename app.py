@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import streamlit as st
 
 DEFAULTS = {
@@ -9,7 +9,6 @@ DEFAULTS = {
     "rest_seconds_power": 90,
     "rest_seconds_strength": 75,
     "rest_seconds_accessory": 45,
-    "rest_seconds_block": 60,
 }
 
 SKILLS = [
@@ -32,15 +31,18 @@ EQUIPMENT = [
     "링/낮은바",
 ]
 
-# 스킬별 조건(설명용)
-SKILL_COND = {
-    "머슬업": "권장: 풀업바 + 딥스 가능. (둘 중 하나 부족해도 대체 가능)",
-    "프론트 레버": "권장: 풀업바 또는 링",
-    "핸드스탠드 푸쉬업": "권장: 벽(초기), 바닥",
-    "플란체": "바닥 가능",
-    "V-sit": "바닥 가능",
-    "피스톨 스쿼트": "바닥 가능(보조물 있으면 더 쉬움)",
-    "백 레버": "권장: 풀업바 또는 링",
+# 스킬별 “필수” 장비(없으면 선택 잠금)
+SKILL_REQ_ANY_OF: Dict[str, List[str]] = {
+    "머슬업": ["풀업바", "링/낮은바"],
+    "프론트 레버": ["풀업바", "링/낮은바"],
+    "백 레버": ["풀업바", "링/낮은바"],
+}
+
+SKILL_NOTE: Dict[str, str] = {
+    "머슬업": "풀업바/링 필요",
+    "프론트 레버": "풀업바/링 필요",
+    "백 레버": "풀업바/링 필요",
+    "핸드스탠드 푸쉬업": "벽 있으면 쉬움",
 }
 
 @dataclass
@@ -58,12 +60,18 @@ def init_state():
     st.session_state.setdefault("settings", DEFAULTS.copy())
     st.session_state.setdefault("profile", {"equipment": [], "skills": [], "freq": 3, "session_minutes": 60})
     st.session_state.setdefault("plan", [])
-    st.session_state.setdefault("player", {"session_idx": 0, "ex_idx": 0, "set_idx": 1, "phase": "idle", "phase_end": None, "phase_total": None})
     st.session_state.setdefault("stretch_done", False)
 
-    # 선택 상태 저장(체크박스용)
-    st.session_state.setdefault("equip_selected", {e: (e in st.session_state["profile"]["equipment"]) for e in EQUIPMENT})
-    st.session_state.setdefault("skill_selected", {s: (s in st.session_state["profile"]["skills"]) for s in SKILLS})
+    st.session_state.setdefault("equip_selected", {e: False for e in EQUIPMENT})
+    st.session_state.setdefault("skill_selected", {s: False for s in SKILLS})
+
+    # “다음” 오작동 방지용 확인 체크(스킬 화면 전용)
+    st.session_state.setdefault("skill_confirm", False)
+
+    st.session_state.setdefault(
+        "player",
+        {"session_idx": 0, "ex_idx": 0, "set_idx": 1, "phase": "idle", "phase_end": None, "phase_total": None},
+    )
 
 def go_step(n: int):
     st.session_state.step = n
@@ -77,51 +85,77 @@ def rest_for(cat: str, settings: Dict) -> int:
         return int(settings["rest_seconds_strength"])
     return int(settings["rest_seconds_accessory"])
 
-def equipment_flags(eq_set: set) -> Dict[str, bool]:
-    return {
-        "can_pull": "풀업바" in eq_set or "링/낮은바" in eq_set,
-        "can_dips": "딥스 가능(평행봉/의자 포함)" in eq_set or "링/낮은바" in eq_set,
-        "can_wall": "벽 사용 가능" in eq_set,
-        "has_db": "덤벨" in eq_set,
-        "has_bb": "바벨" in eq_set,
-        "has_band": "밴드" in eq_set,
-    }
+def has_any(eq_set: set, any_of: List[str]) -> bool:
+    return any(x in eq_set for x in any_of)
 
-def plan_warnings(profile: Dict) -> List[str]:
-    eq = set(profile.get("equipment", []))
-    f = equipment_flags(eq)
-    warn = []
-    if "머슬업" in profile.get("skills", []):
-        if not f["can_pull"]:
-            warn.append("머슬업: 풀업바/링이 없어서 '머슬업 시도'는 제외되고, 당기는 힘(풀업/보조) 위주로 처방됩니다.")
-        if not f["can_dips"]:
-            warn.append("머슬업: 딥스 장비가 없어서 '딥스'는 푸쉬업/파이크 푸쉬업으로 대체됩니다.")
-    if "프론트 레버" in profile.get("skills", []) and not f["can_pull"]:
-        warn.append("프론트 레버: 풀업바/링이 없어서 레버 홀드가 불가능합니다. 풀업바/링을 선택해야 합니다.")
-    if "백 레버" in profile.get("skills", []) and not f["can_pull"]:
-        warn.append("백 레버: 풀업바/링이 없어서 레버 홀드가 불가능합니다. 풀업바/링을 선택해야 합니다.")
-    if "핸드스탠드 푸쉬업" in profile.get("skills", []) and not f["can_wall"]:
-        warn.append("핸드스탠드 푸쉬업: 벽이 없으면 진입(킥업) 학습이 느려질 수 있어, 파이크 푸쉬업 비중이 커집니다.")
-    return warn
+def skill_allowed(skill: str, eq_set: set) -> Tuple[bool, Optional[str]]:
+    req = SKILL_REQ_ANY_OF.get(skill)
+    if not req:
+        return True, None
+    if has_any(eq_set, req):
+        return True, None
+    return False, SKILL_NOTE.get(skill, "장비 필요")
+
+def tile_css():
+    st.markdown("""
+<style>
+/* 타일 버튼 */
+div[data-testid="stButton"] > button {
+    border-radius: 16px !important;
+    padding: 12px 10px !important;
+    min-height: 74px !important;
+    font-weight: 800 !important;
+    white-space: normal !important;
+    line-height: 1.15 !important;
+}
+.small-note { font-size: 12px; opacity: 0.75; margin-top: -6px; }
+</style>
+""", unsafe_allow_html=True)
+
+def tile_grid_toggle(options: List[str], selected_map: Dict[str, bool], key_prefix: str,
+                     disabled_map: Optional[Dict[str, bool]] = None,
+                     note_map: Optional[Dict[str, str]] = None):
+    """
+    멀티 선택 타일.
+    - 누른 타일만 True/False 토글
+    - 다른 타일 상태는 절대 건드리지 않음
+    """
+    tile_css()
+    rows = [options[:4], options[4:]]  # 4 + 3
+    for r, opts in enumerate(rows):
+        cols = st.columns(len(opts))
+        for c, name in enumerate(opts):
+            is_on = bool(selected_map.get(name, False))
+            label = f"✓ {name}" if is_on else name
+            btn_type = "primary" if is_on else "secondary"
+            disabled = bool(disabled_map.get(name, False)) if disabled_map else False
+
+            with cols[c]:
+                if st.button(label, key=f"{key_prefix}_{r}_{c}", type=btn_type, use_container_width=True, disabled=disabled):
+                    selected_map[name] = not is_on
+                    # Streamlit은 버튼 클릭 시 rerun되므로 바로 반영됨
+
+                if note_map and name in note_map:
+                    st.markdown(f"<div class='small-note'>{note_map[name]}</div>", unsafe_allow_html=True)
 
 def generate_plan(profile: Dict, settings: Dict) -> List[List[Exercise]]:
     eq = set(profile.get("equipment", []))
     skills = profile.get("skills", [])
     freq = int(profile.get("freq", 3))
 
-    f = equipment_flags(eq)
+    can_pull = ("풀업바" in eq) or ("링/낮은바" in eq)
+    can_dips = ("딥스 가능(평행봉/의자 포함)" in eq) or ("링/낮은바" in eq)
+    can_wall = ("벽 사용 가능" in eq)
 
     plan: List[List[Exercise]] = []
     for i in range(freq):
         day: List[Exercise] = []
 
-        # 스킬 1개(그날의 대표 스킬)
         if skills:
             s = skills[i % len(skills)]
 
-            # 레버/플란체/V-sit: 홀드(기본)
             if s in ["프론트 레버", "백 레버"]:
-                if f["can_pull"]:
+                if can_pull:
                     day.append(Exercise(
                         name=f"{s} 기본 단계 홀드",
                         kind="hold",
@@ -131,9 +165,6 @@ def generate_plan(profile: Dict, settings: Dict) -> List[List[Exercise]]:
                         rest_seconds=rest_for("power", settings),
                         cues="폼이 깨지기 전에 멈춥니다. 허리 꺾임/어깨 말림이 나오면 즉시 종료합니다."
                     ))
-                else:
-                    # 불가 시 아무것도 넣지 않음(경고는 plan_warnings에서 처리)
-                    pass
 
             elif s in ["플란체", "V-sit"]:
                 day.append(Exercise(
@@ -147,8 +178,7 @@ def generate_plan(profile: Dict, settings: Dict) -> List[List[Exercise]]:
                 ))
 
             elif s == "머슬업":
-                # 머슬업 시도는 풀업바/링이 있을 때만
-                if f["can_pull"]:
+                if can_pull:
                     day.append(Exercise(
                         name="머슬업 시도(무보조 시도)",
                         kind="rep",
@@ -167,8 +197,7 @@ def generate_plan(profile: Dict, settings: Dict) -> List[List[Exercise]]:
                         rest_seconds=rest_for("strength", settings),
                         cues="턱이 바보다 위에 고정되도록 2초 정지. 반동 금지."
                     ))
-                # 딥스 가능하면 딥스, 아니면 대체
-                if f["can_dips"]:
+                if can_dips:
                     day.append(Exercise(
                         name="딥스",
                         kind="rep",
@@ -190,7 +219,7 @@ def generate_plan(profile: Dict, settings: Dict) -> List[List[Exercise]]:
                     ))
 
             elif s == "핸드스탠드 푸쉬업":
-                if f["can_wall"]:
+                if can_wall:
                     day.append(Exercise(
                         name="벽 킥업 연습(핸드스탠드 진입)",
                         kind="rep",
@@ -221,8 +250,7 @@ def generate_plan(profile: Dict, settings: Dict) -> List[List[Exercise]]:
                     cues="무릎이 안쪽으로 무너지지 않게. 가능하면 천천히 내려갑니다."
                 ))
 
-        # 기본 힘(당기기) — 가능할 때만
-        if f["can_pull"]:
+        if can_pull:
             day.append(Exercise(
                 name="풀업",
                 kind="rep",
@@ -233,7 +261,6 @@ def generate_plan(profile: Dict, settings: Dict) -> List[List[Exercise]]:
                 cues="견갑 먼저 고정 후 당깁니다. 반동 금지."
             ))
 
-        # 보조/코어
         day.append(Exercise(
             name="스캐풀라 푸쉬업",
             kind="rep",
@@ -273,49 +300,6 @@ def autorefresh(interval_ms: int = 250):
     else:
         st.button("새로고침", key="manual_refresh")
 
-def tile_checkbox_css():
-    st.markdown("""
-<style>
-/* 체크박스를 타일처럼 보이게 */
-div[data-testid="stCheckbox"] label {
-    border: 1px solid rgba(49, 51, 63, 0.25);
-    border-radius: 16px;
-    padding: 12px 10px;
-    min-height: 74px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 800;
-    line-height: 1.15;
-    gap: 10px;
-}
-
-/* 체크된 타일은 배경 강조(브라우저가 :has 지원하면 적용) */
-div[data-testid="stCheckbox"]:has(input:checked) label {
-    border: 2px solid rgba(49, 51, 63, 0.55);
-    background: rgba(49, 51, 63, 0.06);
-}
-
-/* 체크박스 자체를 조금 키움 */
-div[data-testid="stCheckbox"] input[type="checkbox"] {
-    transform: scale(1.15);
-}
-</style>
-""", unsafe_allow_html=True)
-
-def grid_checkboxes(options: List[str], selected_map: Dict[str, bool], key_prefix: str, captions: Dict[str, str] = None):
-    tile_checkbox_css()
-    rows = [options[:4], options[4:]]  # 4 + 3 = 7칸
-    for r, opts in enumerate(rows):
-        cols = st.columns(len(opts))
-        for c, name in enumerate(opts):
-            with cols[c]:
-                # label 안에 조건을 같이 넣고 싶으면 줄바꿈 텍스트로 처리
-                label = name
-                if captions and name in captions:
-                    label = f"{name}\n{captions[name]}"
-                selected_map[name] = st.checkbox(label, value=bool(selected_map.get(name, False)), key=f"{key_prefix}_{r}_{c}")
-
 def page_stretch():
     st.title("운동 전 스트레칭")
     st.markdown("""
@@ -324,20 +308,17 @@ def page_stretch():
 - 흉추·고관절: 캣카우 8회, 런지 스트레치 양쪽 20초  
 """)
     if st.button("준비 완료", type="primary"):
-        st.session_state.player["phase"] = "idle"
         st.session_state.stretch_done = True
         go_step(5)
 
 def page_settings():
     st.title("설정")
     s = st.session_state.settings
-
     st.subheader("휴식(초)")
     s["rest_seconds_skill"] = st.number_input("스킬 시도 휴식", 30, 300, int(s["rest_seconds_skill"]))
     s["rest_seconds_power"] = st.number_input("파워/기술 휴식", 30, 300, int(s["rest_seconds_power"]))
     s["rest_seconds_strength"] = st.number_input("힘운동 휴식", 30, 300, int(s["rest_seconds_strength"]))
     s["rest_seconds_accessory"] = st.number_input("코어/보조 휴식", 15, 180, int(s["rest_seconds_accessory"]))
-
     s["prep_seconds_hold"] = st.number_input("홀드 준비시간", 0, 30, int(s["prep_seconds_hold"]))
 
     c1, c2 = st.columns(2)
@@ -380,6 +361,7 @@ def page_player():
     if phase == "idle":
         st.markdown(f"### {ex.name}")
         st.write(ex.cues)
+
         if ex.kind == "rep":
             st.write(f"오늘 목표: {ex.reps}회×{ex.sets}세트")
             if st.button("세트 완료 → 휴식", type="primary", use_container_width=True):
@@ -426,8 +408,9 @@ def page_player():
             st.progress(0 if total == 0 else (total-left)/total)
 
             if left == 0:
-                st.success("휴식 종료")
                 last_set = (p["set_idx"] >= ex.sets)
+                st.success("휴식 종료")
+
                 c1, c2 = st.columns(2)
                 with c1:
                     if not last_set:
@@ -465,35 +448,51 @@ def page_player():
 
 def page_onboarding():
     st.title("칼리스데닉스 루틴 앱(프로토타입)")
-    st.caption("장비/동작은 7개 타일로 선택합니다. (토글 오작동 방지: 체크박스 기반)")
+    st.caption("스킬은 멀티선택입니다. (선택 완료 체크를 해야 다음으로 넘어갑니다.)")
 
     step = st.session_state.step
     prof = st.session_state.profile
 
     if step == 1:
         st.subheader("1) 장비 선택")
-        grid_checkboxes(EQUIPMENT, st.session_state.equip_selected, "equip")
+        tile_grid_toggle(EQUIPMENT, st.session_state.equip_selected, "equip")
         prof["equipment"] = [e for e in EQUIPMENT if st.session_state.equip_selected.get(e, False)]
 
         if st.button("다음", type="primary", use_container_width=True):
             go_step(2)
 
     elif step == 2:
-        st.subheader("2) 원하는 동작 선택")
-        grid_checkboxes(SKILLS, st.session_state.skill_selected, "skill", captions=SKILL_COND)
+        st.subheader("2) 원하는 동작 선택(멀티)")
+
+        eq_set = set(prof.get("equipment", []))
+        disabled_map: Dict[str, bool] = {}
+        note_map: Dict[str, str] = {}
+        for s in SKILLS:
+            ok, note = skill_allowed(s, eq_set)
+            disabled_map[s] = not ok
+            # 잠긴 건 강제로 해제
+            if not ok:
+                st.session_state.skill_selected[s] = False
+            if note:
+                note_map[s] = note
+
+        tile_grid_toggle(SKILLS, st.session_state.skill_selected, "skill", disabled_map=disabled_map, note_map=note_map)
         prof["skills"] = [s for s in SKILLS if st.session_state.skill_selected.get(s, False)]
 
-        # 조건 경고(선택 즉시 보여줌)
-        warns = plan_warnings(prof)
-        if warns:
-            st.info("선택한 조건에 따른 안내\n\n- " + "\n- ".join(warns))
+        st.write("현재 선택:", ", ".join(prof["skills"]) if prof["skills"] else "없음")
+
+        st.session_state.skill_confirm = st.checkbox("선택 완료(확인)", value=bool(st.session_state.skill_confirm))
 
         c1, c2 = st.columns(2)
         with c1:
             if st.button("이전", use_container_width=True):
+                st.session_state.skill_confirm = False
                 go_step(1)
+
         with c2:
-            if st.button("다음", type="primary", use_container_width=True):
+            can_next = (len(prof["skills"]) > 0) and bool(st.session_state.skill_confirm)
+            if st.button("다음", type="primary", use_container_width=True, disabled=not can_next):
+                st.session_state.skill_confirm = False
                 go_step(3)
 
     elif step == 3:
@@ -515,11 +514,6 @@ def page_onboarding():
     elif step == 4:
         st.subheader("루틴 목록(시간 미표기)")
         plan = st.session_state.plan
-
-        warns = plan_warnings(prof)
-        if warns:
-            st.info("조건에 따른 처방/제한\n\n- " + "\n- ".join(warns))
-
         for i, day in enumerate(plan):
             with st.expander(f"회차 {i+1}"):
                 for ex in day:
