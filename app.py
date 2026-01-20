@@ -214,10 +214,26 @@ def seconds_left(end_epoch: float) -> int:
     return max(0, int(round(end_epoch - time.time())))
 
 def autorefresh(interval_ms: int = 250):
-    if hasattr(st, "autorefresh"):
-        st.autorefresh(interval=interval_ms, key="__ar__")
-    else:
+    """
+    타이머 화면 자동 갱신.
+    - streamlit-autorefresh 패키지가 있으면 세션을 유지한 채로 주기적으로 rerun.
+    - 없으면 수동 새로고침 버튼(타이머가 흐르지 않음).
+    """
+    try:
+        from streamlit_autorefresh import st_autorefresh
+        st_autorefresh(interval=interval_ms, key="__ar__")
+    except Exception:
         st.button("새로고침", key="manual_refresh")
+
+def safe_rerun():
+    """Streamlit 버전 차이 대응: 가능하면 st.rerun(), 아니면 experimental_rerun()."""
+    try:
+        st.rerun()
+    except Exception:
+        try:
+            st.experimental_rerun()
+        except Exception:
+            return
 
 def safe_rerun():
     """Streamlit 버전 차이 대응: 가능하면 st.rerun(), 아니면 experimental_rerun()"""
@@ -630,7 +646,7 @@ def page_settings():
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("저장", type="primary"):
-            go_step(5 if st.session_state.plan else 1)
+            go_step(int(st.session_state.get("return_step", 5)) if st.session_state.plan else 1)
     with c2:
         if st.button("테스트 화면"):
             go_step(98)
@@ -663,9 +679,11 @@ def page_player():
             go_step(5)
     with t2:
         if st.button("테스트"):
+            st.session_state.return_step = 6
             go_step(98)
     with t3:
         if st.button("설정"):
+            st.session_state.return_step = 6
             go_step(99)
 
     # 운동 이름 + 긴 설명
@@ -830,11 +848,10 @@ def page_test():
             st.success("4주 테스트 저장 완료")
     with c3:
         if st.button("뒤로"):
-            # 초기테스트가 없으면 온보딩으로
-            if st.session_state.tests["latest"]:
-                go_step(5 if st.session_state.plan else 4)
-            else:
-                go_step(3)
+        if st.session_state.tests["latest"]:
+            go_step(int(st.session_state.get("return_step", 5)) if st.session_state.plan else 4)
+        else:
+            go_step(3)
 
     if st.session_state.tests["history"]:
         st.subheader("테스트 기록(최근)")
@@ -941,9 +958,11 @@ def page_onboarding():
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             if st.button("설정"):
+                st.session_state.return_step = 5
                 go_step(99)
         with c2:
             if st.button("테스트"):
+                st.session_state.return_step = 5
                 go_step(98)
         with c3:
             if st.button("처음으로"):
