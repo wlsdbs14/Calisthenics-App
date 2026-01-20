@@ -1,4 +1,5 @@
 import time
+from datetime import date, timedelta
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -203,6 +204,8 @@ def init_state():
     st.session_state.setdefault("step", 1)
     st.session_state.setdefault("equip", [])
     st.session_state.setdefault("skills", [])
+    # 출석/결석 기록(날짜 ISO 문자열 리스트)
+    st.session_state.setdefault("attendance", {"done": [], "skip": []})
     st.session_state.setdefault(
         "profile",
         {
@@ -210,7 +213,12 @@ def init_state():
             "weight_kg": 65,
             "sessions_per_week": 3,
             "session_minutes": 60,
+            # 현재 주차는 '시작일'로부터 자동 계산(달력 기준)
+            "start_date": None,  # ISO(YYYY-MM-DD)
             "current_week": 1,
+            # 결석이 많으면 '점진 증가'만 보정(주차 자체는 그대로)
+            "block_mode": "progress",  # progress | hold | regress
+            "block_mode_from": 1,
         },
     )
     st.session_state.setdefault(
@@ -227,6 +235,15 @@ def init_state():
             "tuck_lsit_hold_s": 0,
             "pistol_assisted_each": 0,
             "latest_retest_week": 0,
+        },
+    )
+
+    # 출석/결석 기록(달력 기준으로 블록 진행률 계산용)
+    st.session_state.setdefault(
+        "attendance",
+        {
+            "done": [],  # ["YYYY-MM-DD", ...]
+            "skip": [],
         },
     )
 
@@ -311,6 +328,122 @@ def clamp(x: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, x))
 
 
+# =========================
+# 주차/블록(4주) 계산 + 결석 보정
+# =========================
+
+def _iso(d: date) -> str:
+    return d.isoformat()
+
+
+def _parse_iso(s: str) -> date:
+    return date.fromisoformat(s)
+
+
+def compute_current_week(prof: Dict) -> int:
+    """시작일 기준으로 달력 주차 계산(1부터)."""
+    sd = prof.get("start_date")
+    if not sd:
+        prof["start_date"] = _iso(date.today())
+        sd = prof["start_date"]
+    start = _parse_iso(sd)
+    delta_days = (date.today() - start).days
+    if delta_days < 0:
+        # 미래 시작일이 들어오면 오늘을 시작일로 강제
+        prof["start_date"] = _iso(date.today())
+        return 1
+    return (delta_days // 7) + 1
+
+
+def block_num_from_week(week: int) -> int:
+    return ((week - 1) // 4) + 1
+
+
+def block_date_range(start_iso: str, block_num: int) -> Tuple[date, date]:
+    start = _parse_iso(start_iso) + timedelta(days=(block_num - 1) * 28)
+    end = start + timedelta(days=27)
+    return start, end
+
+
+def count_done_in_range(att: Dict, start_d: date, end_d: date) -> int:
+    done = 0
+    for s in att.get("done", []):
+        try:
+            d = _parse_iso(s)
+        except Exception:
+            continue
+        if start_d <= d <= end_d:
+            done += 1
+    return done
+
+
+def update_block_mode(prof: Dict, att: Dict) -> Tuple[str, float]:
+    """결석/출석률로 다음 블록의 강도 모드를 보정.
+
+    - progress: 정상 점진 증가
+    - hold: 1블록 뒤로(강도 상승 보류)
+    - regress: 1블록 뒤로 + 약간 더 낮춤
+    """
+    # current_week는 항상 최신으로 동기화
+    week = int(prof.get("current_week", 1))
+    b = block_num_from_week(week)
+    if not prof.get("start_date"):
+        prof["start_date"] = _iso(date.today())
+
+    # 블록이 바뀐 시점에만 '직전 블록'을 평가
+    if int(prof.get("block_mode_from", 1)) == b:
+        return str(prof.get("block_mode", "progress")), float(prof.get("block_last_rate", 1.0))
+
+    prev_b = b - 1
+    if prev_b < 1:
+        prof["block_mode"] = "progress"
+        prof["block_mode_from"] = b
+        prof["block_last_rate"] = 1.0
+        return "progress", 1.0
+
+    s, e = block_date_range(str(prof["start_date"]), prev_b)
+    planned = int(prof.get("sessions_per_week", 3)) * 4
+    done = count_done_in_range(att, s, e)
+    rate = (done / planned) if planned > 0 else 1.0
+
+    if rate >= 0.80:
+        mode = "progress"
+    elif rate >= 0.50:
+        mode = "hold"
+    else:
+        mode = "regress"
+
+    prof["block_mode"] = mode
+    prof["block_mode_from"] = b
+    prof["block_last_rate"] = rate
+    return mode, rate
+
+
+def effective_week_for_load(week: int, mode: str) -> int:
+    if mode == "progress":
+        return week
+    return max(1, week - 4)
+
+
+def log_attendance(att: Dict, status: str, d: date) -> None:
+    s = _iso(d)
+    done = set(att.get("done", []))
+    skip = set(att.get("skip", []))
+
+    # 한 날짜는 done/skip 중 하나만
+    if status == "done":
+        done.add(s)
+        if s in skip:
+            skip.remove(s)
+    else:
+        skip.add(s)
+        if s in done:
+            done.remove(s)
+
+    att["done"] = sorted(done)
+    att["skip"] = sorted(skip)
+
+
 def week_phase(week: int) -> int:
     # 1~4 반복
     w = ((week - 1) % 4) + 1
@@ -332,7 +465,11 @@ def progression_multiplier(week: int) -> float:
 def make_tasks_for_day(day_index: int, skills: List[str], eq: List[str], tests: Dict, prof: Dict) -> List[Task]:
     # day_index: 1..N (주 N회)
     week = int(prof.get("current_week", 1))
-    mult = progression_multiplier(week)
+    mode = str(prof.get("block_mode", "progress"))
+    eff_week = effective_week_for_load(week, mode)
+    mult = progression_multiplier(eff_week)
+    if mode == "regress":
+        mult *= 0.90
 
     pullup_max = int(tests.get("pullup_max", 0))
     dip_max = int(tests.get("dip_max", 0))
@@ -624,7 +761,7 @@ def page_skills():
     st.title(APP_TITLE)
     st.header("2) 원하는 동작 선택")
 
-    st.session_state.skills = tile_skill_select(SKILLS, st.session_state.skills, st.session_state.equip)
+    st.session_state.skills = tile_skill_select(st.session_state.equip, st.session_state.skills)
 
     st.markdown("---")
     col1, col2 = st.columns([1, 1])
@@ -645,6 +782,11 @@ def page_profile_and_tests():
 
     prof = st.session_state.profile
     tests = st.session_state.tests
+    att = st.session_state.attendance
+
+    # 주차 자동 계산 + 블록 모드 업데이트(결석 반영)
+    prof["current_week"] = compute_current_week(prof)
+    mode, last_rate = update_block_mode(prof, att)
 
     colA, colB, colC = st.columns(3)
     with colA:
@@ -654,8 +796,20 @@ def page_profile_and_tests():
         prof["sessions_per_week"] = st.radio("주 몇 회?", [2, 3, 4, 5, 6], index=[2,3,4,5,6].index(int(prof["sessions_per_week"])) if int(prof["sessions_per_week"]) in [2,3,4,5,6] else 1)
         prof["session_minutes"] = st.slider("1회 운동 가능 시간(분)", 30, 120, int(prof["session_minutes"]), step=5)
     with colC:
-        prof["current_week"] = st.number_input("현재 진행 주차(숫자)", 1, 260, int(prof.get("current_week", 1)))
+        # 시작일을 바꾸면 주차가 자동으로 바뀜
+        sd = prof.get("start_date") or _iso(date.today())
+        try:
+            sd_val = _parse_iso(sd)
+        except Exception:
+            sd_val = date.today()
+        new_sd = st.date_input("훈련 시작일", value=sd_val)
+        prof["start_date"] = _iso(new_sd)
+        prof["current_week"] = compute_current_week(prof)
+
+        st.metric("현재 주차", f"{int(prof['current_week'])}주차")
         st.caption("4주마다 리테스트를 권장합니다.")
+        if mode != "progress":
+            st.info(f"직전 4주 출석률이 낮아서 이번 블록은 점진 증가를 보류합니다. (모드: {mode}, 출석률: {int(last_rate*100)}%)")
 
     st.subheader("기본 테스트(권장)")
     c1, c2, c3, c4 = st.columns(4)
@@ -690,7 +844,7 @@ def page_profile_and_tests():
 
     # 4주마다 리테스트 안내
     phase = week_phase(int(prof["current_week"]))
-    if int(prof["current_week"]) > 1 and phase == 1:
+    if int(prof["current_week"]) > 1 and phase == 1 and mode != "regress":
         st.warning("이번 주는 4주 사이클이 새로 시작되는 주입니다. 가능하면 리테스트(최대치)를 다시 입력하면 루틴 정확도가 올라갑니다.")
         if st.button("이번 주 리테스트로 저장"):
             tests["latest_retest_week"] = int(prof["current_week"])  # 기록
@@ -714,6 +868,37 @@ def page_plan():
     skills = st.session_state.skills
     prof = st.session_state.profile
     tests = st.session_state.tests
+    att = st.session_state.attendance
+
+    # 주차/결석 반영 최신화
+    prof["current_week"] = compute_current_week(prof)
+    mode, last_rate = update_block_mode(prof, att)
+
+    st.subheader("이번 블록 진행")
+    b = block_num_from_week(int(prof["current_week"]))
+    bs, be = block_date_range(str(prof.get("start_date") or _iso(date.today())), b)
+    planned = int(prof.get("sessions_per_week", 3)) * 4
+    done = count_done_in_range(att, bs, be)
+    rate = (done / planned) if planned > 0 else 0.0
+    st.write(f"현재 주차: {int(prof['current_week'])}주차 (4주 블록 {b})")
+    st.progress(min(max(rate, 0.0), 1.0))
+    st.caption(f"이 블록 완료: {done}/{planned}회 (약 {int(rate*100)}%)  |  모드: {mode}")
+
+    colx, coly, colz = st.columns([1, 1, 2])
+    with colx:
+        if st.button("오늘 운동 완료로 기록"):
+            log_attendance(att, "done", date.today())
+            st.success("오늘을 '완료'로 기록했습니다.")
+            st.rerun()
+    with coly:
+        if st.button("오늘 결석(스킵)으로 기록"):
+            log_attendance(att, "skip", date.today())
+            st.info("오늘을 '결석'으로 기록했습니다.")
+            st.rerun()
+    with colz:
+        st.caption("결석이 많으면 다음 4주 블록에서 점진 증가가 자동으로 보류됩니다.")
+
+    st.markdown("---")
 
     plan = make_week_plan(skills, eq, tests, prof)
     st.session_state["plan"] = plan
